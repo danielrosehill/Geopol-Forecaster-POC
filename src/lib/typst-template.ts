@@ -199,6 +199,116 @@ const SITREP_SECTION_TITLES: Record<string, string> = {
   outlook: "12–24 Hour Outlook",
 };
 
+/**
+ * Build a single-lens PDF with polished styling.
+ */
+export function buildLensTypstSource(params: {
+  lensId: string;
+  lensName: string;
+  agentModel: string;
+  content: string;
+  sessionId: string;
+  createdAt: string;
+}): string {
+  const timestamp = new Date(params.createdAt).toUTCString();
+  const generatedAt = new Date().toUTCString();
+
+  return `
+#set document(title: "${params.lensName} Forecast — Geopol Forecaster", author: "Geopol Forecaster")
+#set page(
+  paper: "a4",
+  margin: (top: 2.5cm, bottom: 2.5cm, left: 2cm, right: 2cm),
+  header: context {
+    if counter(page).get().first() > 1 {
+      grid(
+        columns: (1fr, 1fr),
+        align(left, text(size: 8pt, fill: rgb("#888"))[
+          ${params.lensName} Forecast
+        ]),
+        align(right, text(size: 8pt, fill: rgb("#888"))[
+          Session ${escapeTypstChars(params.sessionId.slice(0, 8))}
+        ]),
+      )
+    }
+  },
+  footer: context {
+    let current = counter(page).get().first()
+    let total = counter(page).final().first()
+    grid(
+      columns: (1fr, 1fr),
+      align(left, text(size: 8pt, fill: rgb("#999"))[
+        Generated: ${generatedAt}
+      ]),
+      align(right, text(size: 8pt, fill: rgb("#999"))[
+        Page #current of #total
+      ]),
+    )
+  },
+)
+#set text(font: "New Computer Modern", size: 11pt)
+#set par(justify: true)
+
+// Title page
+#v(3cm)
+
+#align(center)[
+  #text(size: 11pt, fill: rgb("#888"), tracking: 0.15em, weight: "medium")[GEOPOL FORECASTER]
+  #v(0.6cm)
+  #line(length: 40%, stroke: 1pt + rgb("#ccc"))
+  #v(0.6cm)
+  #text(size: 24pt, weight: "bold")[${escapeTypstChars(params.lensName)} Forecast]
+  #v(0.4cm)
+  #text(size: 12pt, fill: rgb("#555"))[Iran\\–Israel\\–US Conflict Assessment]
+  #v(1cm)
+  #block(
+    width: 70%,
+    inset: 16pt,
+    radius: 4pt,
+    stroke: 0.5pt + rgb("#ddd"),
+    fill: rgb("#fafafa"),
+  )[
+    #set text(size: 9.5pt)
+    #grid(
+      columns: (auto, 1fr),
+      column-gutter: 12pt,
+      row-gutter: 8pt,
+      text(fill: rgb("#888"))[Session],
+      text(font: "New Computer Modern Mono")[${escapeTypstChars(params.sessionId.slice(0, 8))}],
+      text(fill: rgb("#888"))[Analysis date],
+      [${timestamp}],
+      text(fill: rgb("#888"))[Agent],
+      [${escapeTypstChars(params.agentModel)}],
+      text(fill: rgb("#888"))[PDF generated],
+      [${generatedAt}],
+    )
+  ]
+]
+
+#v(1cm)
+#line(length: 60%, stroke: 0.5pt + rgb("#ccc"))
+#align(center, text(size: 9pt, fill: rgb("#999"))[This document contains a single analytical lens from a multi-perspective forecast session.])
+
+#pagebreak()
+
+// Content
+= ${escapeTypstChars(params.lensName)} Lens Analysis
+
+#text(size: 9pt, fill: rgb("#666"))[_Agent: ${escapeTypstChars(params.agentModel)} (via OpenRouter)_]
+
+#v(0.3cm)
+
+${markdownToTypst(params.content)}
+
+#v(1cm)
+#line(length: 100%, stroke: 0.5pt + rgb("#ddd"))
+#v(0.3cm)
+#text(size: 8pt, fill: rgb("#999"))[
+  This forecast was generated as part of a multi-agent analysis session using the Geopol Forecaster system.
+  Session ${escapeTypstChars(params.sessionId.slice(0, 8))} \\— ${timestamp}
+]
+`;
+}
+
 export function buildTypstSource(params: {
   sessionId: string;
   createdAt: string;

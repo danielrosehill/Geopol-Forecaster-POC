@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import dynamic from "next/dynamic";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { LENSES } from "@/lib/types";
+import { LENSES, TIMEFRAMES } from "@/lib/types";
+import type { LensForecast, TimeframeId } from "@/lib/types";
 
 const MDEditor = dynamic(() => import("@uiw/react-md-editor"), { ssr: false });
 
@@ -24,7 +25,7 @@ interface SessionEntry {
   step: Step;
   groundTruth: string;
   sitrep: Record<string, string>;
-  forecasts: Record<string, string>;
+  forecasts: Record<string, LensForecast>;
   summary: string;
 }
 
@@ -42,7 +43,7 @@ const SITREP_SECTION_TITLES: Record<string, string> = {
   home_front: "Home Front",
   world_reaction: "International Reaction",
   osint_indicators: "OSINT Indicators",
-  outlook: "12–24h Outlook",
+  outlook: "12-24h Outlook",
 };
 
 const SITREP_SECTION_ORDER = Object.keys(SITREP_SECTION_TITLES);
@@ -62,16 +63,74 @@ function saveSession(session: SessionEntry) {
   });
 }
 
+/** Normalize forecast data: old sessions store plain strings, new ones store {full, timeframes} */
+function normalizeForecast(val: unknown): LensForecast {
+  if (typeof val === "string") return { full: val, timeframes: {} };
+  if (val && typeof val === "object" && "full" in val) return val as LensForecast;
+  return { full: "", timeframes: {} };
+}
+
+function normalizeForecasts(raw: Record<string, unknown>): Record<string, LensForecast> {
+  const out: Record<string, LensForecast> = {};
+  for (const [k, v] of Object.entries(raw)) out[k] = normalizeForecast(v);
+  return out;
+}
+
 /* ── Markdown prose styles ── */
 const proseClasses =
   "prose prose-sm prose-zinc max-w-none prose-headings:text-zinc-900 prose-p:text-zinc-700 prose-strong:text-zinc-800 prose-li:text-zinc-700 prose-a:text-blue-600";
 
 function MarkdownView({ content }: { content: string }) {
   return (
-    <div className={`bg-zinc-50 border border-zinc-200 rounded p-4 ${proseClasses}`}>
+    <div className={`bg-zinc-50/80 border border-zinc-200 rounded-lg p-5 ${proseClasses}`}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
     </div>
   );
+}
+
+/* ── Toast System ── */
+interface Toast {
+  id: string;
+  message: string;
+  type: "success" | "error" | "info";
+}
+
+function ToastContainer({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: string) => void }) {
+  return (
+    <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-2 pointer-events-none">
+      {toasts.map((t) => (
+        <div
+          key={t.id}
+          className={`pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg text-sm font-medium transition-all animate-slide-up ${
+            t.type === "success"
+              ? "bg-emerald-900 text-emerald-100 border border-emerald-700"
+              : t.type === "error"
+                ? "bg-red-900 text-red-100 border border-red-700"
+                : "bg-zinc-800 text-zinc-100 border border-zinc-600"
+          }`}
+        >
+          <span>
+            {t.type === "success" ? "\u2713" : t.type === "error" ? "\u2717" : "\u2139"}
+          </span>
+          <span>{t.message}</span>
+          <button onClick={() => onDismiss(t.id)} className="ml-2 opacity-60 hover:opacity-100 text-xs">
+            \u2715
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function useToasts() {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const dismiss = useCallback((id: string) => setToasts((p) => p.filter((t) => t.id !== id)), []);
+  const show = useCallback((message: string, type: Toast["type"] = "info") => {
+    const id = crypto.randomUUID();
+    setToasts((p) => [...p, { id, message, type }]);
+    setTimeout(() => setToasts((p) => p.filter((t) => t.id !== id)), 4000);
+  }, []);
+  return { toasts, show, dismiss };
 }
 
 export default function Home() {
@@ -84,13 +143,18 @@ export default function Home() {
   const [createdAt, setCreatedAt] = useState(() => new Date().toISOString());
   const [groundTruth, setGroundTruth] = useState("");
   const [sitrep, setSitrep] = useState<Record<string, string>>({});
-  const [forecasts, setForecasts] = useState<Record<string, string>>({});
+  const [forecasts, setForecasts] = useState<Record<string, LensForecast>>({});
   const [summary, setSummary] = useState("");
   const [error, setError] = useState("");
   const [activeLens, setActiveLens] = useState<string | null>(null);
   const [activeSitrepSection, setActiveSitrepSection] = useState<string | null>(null);
   const [editingSitrepSection, setEditingSitrepSection] = useState<string | null>(null);
   const [doneTab, setDoneTab] = useState<"summary" | "sitrep" | "forecasts" | "analysis">("summary");
+  const [forecastView, setForecastView] = useState<"by-lens" | "by-timeframe">("by-timeframe");
+  const [activeTimeframe, setActiveTimeframe] = useState<TimeframeId>("24h");
+  const [downloadingLens, setDownloadingLens] = useState<string | null>(null);
+
+  const { toasts, show: showToast, dismiss: dismissToast } = useToasts();
 
   // Load sessions from backend on mount
   useEffect(() => {
@@ -126,7 +190,7 @@ export default function Home() {
     setStep(session.step as Step);
     setGroundTruth(session.groundTruth);
     setSitrep(session.sitrep ?? {});
-    setForecasts(session.forecasts);
+    setForecasts(normalizeForecasts(session.forecasts ?? {}));
     setSummary(session.summary);
     setError("");
     setActiveLens(null);
@@ -168,14 +232,16 @@ export default function Home() {
       const data = await res.json();
       setGroundTruth(data.groundTruth);
       setStep("review");
+      showToast("Intelligence gathered from 2 sources", "success");
       await persistAndUpdateList({ ...entry, step: "review", groundTruth: data.groundTruth });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
+      showToast("Intelligence gathering failed", "error");
       setStep("idle");
     }
-  }, [sessionId, createdAt, persistAndUpdateList]);
+  }, [sessionId, createdAt, persistAndUpdateList, showToast]);
 
-  /* Confirm ground truth → generate SITREP → pause at sitrep_review */
+  /* Confirm ground truth -> generate SITREP -> pause at sitrep_review */
   const confirmGroundTruth = useCallback(async () => {
     setError("");
     setStep("sitrep");
@@ -190,8 +256,8 @@ export default function Home() {
       const sitrepData = await sitrepRes.json();
       setSitrep(sitrepData.sitrep);
       setStep("sitrep_review");
+      showToast("SITREP generated — review and edit sections", "success");
 
-      // Auto-select first section for editing
       const firstKey = SITREP_SECTION_ORDER.find((k) => sitrepData.sitrep[k]);
       if (firstKey) setEditingSitrepSection(firstKey);
 
@@ -201,16 +267,16 @@ export default function Home() {
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
+      showToast("SITREP generation failed", "error");
       setStep("review");
     }
-  }, [groundTruth, sessionId, createdAt, persistAndUpdateList]);
+  }, [groundTruth, sessionId, createdAt, persistAndUpdateList, showToast]);
 
-  /* Confirm SITREP → forecast → summarize → done */
+  /* Confirm SITREP -> forecast -> summarize -> done */
   const confirmSitrep = useCallback(async () => {
     setError("");
 
     try {
-      // Forecast
       setStep("forecasting");
       const res = await fetch("/api/forecast", {
         method: "POST",
@@ -219,9 +285,10 @@ export default function Home() {
       });
       if (!res.ok) throw new Error(`Forecast failed: ${res.statusText}`);
       const data = await res.json();
-      setForecasts(data.forecasts);
+      const normalizedF = normalizeForecasts(data.forecasts);
+      setForecasts(normalizedF);
+      showToast("6 forecast agents completed", "success");
 
-      // Summarize
       setStep("summarizing");
       const sumRes = await fetch("/api/summarize", {
         method: "POST",
@@ -232,35 +299,80 @@ export default function Home() {
       const sumData = await sumRes.json();
       setSummary(sumData.summary);
       setStep("done");
+      showToast("Analysis complete — report ready", "success");
 
       await persistAndUpdateList({
         id: sessionId, createdAt, step: "done",
-        groundTruth, sitrep, forecasts: data.forecasts, summary: sumData.summary,
+        groundTruth, sitrep, forecasts: normalizedF, summary: sumData.summary,
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
+      showToast("Forecast pipeline failed", "error");
       setStep("sitrep_review");
     }
-  }, [groundTruth, sitrep, sessionId, createdAt, persistAndUpdateList]);
+  }, [groundTruth, sitrep, sessionId, createdAt, persistAndUpdateList, showToast]);
 
   const downloadPdf = useCallback(async () => {
+    showToast("Generating full report PDF...", "info");
     const res = await fetch("/api/generate-pdf", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId, createdAt, groundTruth, sitrep, forecasts, summary }),
     });
     if (!res.ok) {
-      setError("PDF generation failed");
+      showToast("PDF generation failed", "error");
       return;
     }
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `geopol-forecast-${sessionId.slice(0, 8)}.pdf`;
+    const ts = new Date(createdAt).toISOString().slice(0, 16).replace(/[T:]/g, "-");
+    a.download = `geopol-full-report-${ts}-${sessionId.slice(0, 8)}.pdf`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [sessionId, createdAt, groundTruth, sitrep, forecasts, summary]);
+    showToast("Full report downloaded", "success");
+  }, [sessionId, createdAt, groundTruth, sitrep, forecasts, summary, showToast]);
+
+  const downloadLensPdf = useCallback(async (lensId: string) => {
+    const lens = LENSES.find((l) => l.id === lensId);
+    if (!lens || !forecasts[lensId]) return;
+    setDownloadingLens(lensId);
+    showToast(`Generating ${lens.name} PDF...`, "info");
+
+    try {
+      const res = await fetch("/api/generate-lens-pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lensId,
+          lensName: lens.name,
+          agentModel: LENS_AGENTS[lensId]?.label ?? "Unknown",
+          content: forecasts[lensId].full,
+          sessionId,
+          createdAt,
+        }),
+      });
+      if (!res.ok) {
+        showToast(`Failed to generate ${lens.name} PDF`, "error");
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const cd = res.headers.get("Content-Disposition");
+      const filenameMatch = cd?.match(/filename="(.+)"/);
+      a.download = filenameMatch?.[1] ?? `${lensId}-forecast.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(`${lens.name} forecast downloaded`, "success");
+    } catch {
+      showToast(`Failed to generate ${lens.name} PDF`, "error");
+    } finally {
+      setDownloadingLens(null);
+    }
+  }, [forecasts, sessionId, createdAt, showToast]);
 
   const updateSitrepSection = useCallback(
     (key: string, value: string) => {
@@ -272,12 +384,17 @@ export default function Home() {
   const STEP_LABELS = ["Gather", "Review", "SITREP", "Edit SITREP", "Forecast", "Summarize", "Report"] as const;
   const STEP_MAP: Step[] = ["gathering", "review", "sitrep", "sitrep_review", "forecasting", "summarizing", "done"];
 
+  /** Check if any lens has structured timeframe data */
+  const hasTimeframeData = Object.values(forecasts).some(
+    (f) => f.timeframes && Object.keys(f.timeframes).length > 0 && !f.timeframes["_full"]
+  );
+
   return (
     <>
       {/* Sidebar */}
       <aside className="w-64 shrink-0 border-r border-zinc-200 bg-zinc-50 flex flex-col h-screen sticky top-0">
         <div className="px-4 py-4 border-b border-zinc-200">
-          <h2 className="text-sm font-semibold text-zinc-900">Sessions</h2>
+          <h2 className="text-sm font-semibold text-zinc-900 tracking-tight">Sessions</h2>
         </div>
         <div className="flex-1 overflow-y-auto">
           {loading && (
@@ -302,10 +419,10 @@ export default function Home() {
               </p>
               <span className={`inline-block mt-1 text-[10px] font-mono px-1.5 py-0.5 rounded ${
                 s.step === "done"
-                  ? "bg-green-100 text-green-700"
+                  ? "bg-emerald-100 text-emerald-700"
                   : s.step === "idle"
                     ? "bg-zinc-100 text-zinc-500"
-                    : "bg-blue-100 text-blue-700"
+                    : "bg-blue-50 text-blue-600"
               }`}>
                 {s.step === "idle" ? "new" : s.step === "done" ? "complete" : s.step}
               </span>
@@ -315,7 +432,7 @@ export default function Home() {
         <div className="px-4 py-3 border-t border-zinc-200">
           <button
             onClick={startNewSession}
-            className="w-full bg-zinc-900 text-white text-sm px-3 py-2 rounded font-medium hover:bg-zinc-800 transition-colors"
+            className="w-full bg-zinc-900 text-white text-sm px-3 py-2 rounded-lg font-medium hover:bg-zinc-800 transition-colors"
           >
             + New Session
           </button>
@@ -327,14 +444,14 @@ export default function Home() {
         {/* Header */}
         <div className="border-b border-zinc-200 pb-6">
           <h1 className="text-2xl font-bold tracking-tight text-zinc-900">Geopol Forecaster</h1>
-          <p className="text-sm text-zinc-500 mt-1">Iran–Israel–US Conflict Assessment</p>
+          <p className="text-sm text-zinc-500 mt-1">Iran-Israel-US Conflict Assessment</p>
           <p className="text-xs text-zinc-400 font-mono mt-1">
             Session {sessionId.slice(0, 8)} &middot; {new Date(createdAt).toUTCString()}
           </p>
         </div>
 
         {/* Progress */}
-        <div className="flex gap-2 text-xs font-mono flex-wrap">
+        <div className="flex gap-1.5 text-xs font-mono flex-wrap">
           {STEP_LABELS.map((label, i) => {
             const idx = STEP_MAP.indexOf(step);
             const isActive = i === idx;
@@ -342,17 +459,17 @@ export default function Home() {
             return (
               <div
                 key={label}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md transition-all ${
                   isActive
-                    ? "bg-zinc-200 text-zinc-900"
+                    ? "bg-zinc-900 text-white shadow-sm"
                     : isDone
-                      ? "bg-zinc-100 text-zinc-600"
+                      ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
                       : "bg-zinc-50 text-zinc-400 border border-zinc-200"
                 }`}
               >
                 <span
                   className={`inline-block w-1.5 h-1.5 rounded-full ${
-                    isActive ? "bg-blue-500 animate-pulse" : isDone ? "bg-green-500" : "bg-zinc-300"
+                    isActive ? "bg-blue-400 animate-pulse" : isDone ? "bg-emerald-500" : "bg-zinc-300"
                   }`}
                 />
                 {label}
@@ -363,21 +480,25 @@ export default function Home() {
 
         {/* Error */}
         {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-3 rounded">
+          <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-3 rounded-lg flex items-center gap-2">
+            <span className="text-red-400">{"\u26A0"}</span>
             {error}
           </div>
         )}
 
         {/* Step: Idle */}
         {step === "idle" && (
-          <div className="flex flex-col items-center justify-center gap-4 py-16">
-            <p className="text-zinc-500 text-center max-w-md">
+          <div className="flex flex-col items-center justify-center gap-5 py-20">
+            <div className="w-12 h-12 rounded-full bg-zinc-100 flex items-center justify-center text-zinc-400 text-xl">
+              {"\u25C9"}
+            </div>
+            <p className="text-zinc-500 text-center max-w-md leading-relaxed">
               Start a new forecasting session. The system will gather current intelligence,
               generate a structured SITREP, then produce scenario forecasts from six analytical lenses.
             </p>
             <button
               onClick={startGathering}
-              className="bg-zinc-900 text-white px-6 py-2.5 rounded font-medium text-sm hover:bg-zinc-800 transition-colors"
+              className="bg-zinc-900 text-white px-8 py-3 rounded-lg font-medium text-sm hover:bg-zinc-800 transition-colors shadow-sm"
             >
               Start Session
             </button>
@@ -386,20 +507,23 @@ export default function Home() {
 
         {/* Step: Gathering */}
         {step === "gathering" && (
-          <div className="flex flex-col items-center justify-center gap-3 py-16">
+          <div className="flex flex-col items-center justify-center gap-4 py-20">
             <Spinner />
-            <p className="text-zinc-500 text-sm">Gathering intelligence from Gemini and Grok...</p>
+            <div className="text-center">
+              <p className="text-zinc-700 text-sm font-medium">Gathering intelligence</p>
+              <p className="text-zinc-400 text-xs mt-1">Querying Gemini (search-grounded) and Grok...</p>
+            </div>
           </div>
         )}
 
-        {/* Step: Review Ground Truth (rich markdown editor) */}
+        {/* Step: Review Ground Truth */}
         {step === "review" && (
           <div className="flex flex-col gap-4" data-color-mode="light">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold text-zinc-900">Draft Ground Truth</h2>
-              <span className="text-xs text-zinc-400">Edit as needed, then confirm</span>
+              <span className="text-xs text-zinc-400 bg-zinc-100 px-2 py-1 rounded">Edit as needed, then confirm</span>
             </div>
-            <div className="border border-zinc-300 rounded overflow-hidden">
+            <div className="border border-zinc-300 rounded-lg overflow-hidden shadow-sm">
               <MDEditor
                 value={groundTruth}
                 onChange={(val) => setGroundTruth(val ?? "")}
@@ -417,7 +541,7 @@ export default function Home() {
               </button>
               <button
                 onClick={confirmGroundTruth}
-                className="bg-zinc-900 text-white px-6 py-2 rounded font-medium text-sm hover:bg-zinc-800 transition-colors"
+                className="bg-zinc-900 text-white px-6 py-2.5 rounded-lg font-medium text-sm hover:bg-zinc-800 transition-colors shadow-sm"
               >
                 Confirm Ground Truth
               </button>
@@ -427,9 +551,12 @@ export default function Home() {
 
         {/* Step: SITREP generation (loading) */}
         {step === "sitrep" && (
-          <div className="flex flex-col items-center justify-center gap-3 py-16">
+          <div className="flex flex-col items-center justify-center gap-4 py-20">
             <Spinner />
-            <p className="text-zinc-500 text-sm">Generating structured SITREP...</p>
+            <div className="text-center">
+              <p className="text-zinc-700 text-sm font-medium">Generating SITREP</p>
+              <p className="text-zinc-400 text-xs mt-1">Structuring 14-section situation report...</p>
+            </div>
           </div>
         )}
 
@@ -438,10 +565,9 @@ export default function Home() {
           <div className="flex flex-col gap-4" data-color-mode="light">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold text-zinc-900">Review Situation Report</h2>
-              <span className="text-xs text-zinc-400">Edit sections as needed, then approve</span>
+              <span className="text-xs text-zinc-400 bg-zinc-100 px-2 py-1 rounded">Edit sections as needed</span>
             </div>
 
-            {/* Section tabs */}
             <div className="flex flex-wrap gap-2">
               {SITREP_SECTION_ORDER.map((key) => {
                 if (!sitrep[key]) return null;
@@ -450,10 +576,10 @@ export default function Home() {
                   <button
                     key={key}
                     onClick={() => setEditingSitrepSection(isActive ? null : key)}
-                    className={`px-3 py-1.5 rounded text-xs font-mono transition-colors ${
+                    className={`px-3 py-1.5 rounded-md text-xs font-mono transition-all ${
                       isActive
-                        ? "bg-zinc-900 text-white"
-                        : "bg-white border border-zinc-300 text-zinc-500 hover:text-zinc-700"
+                        ? "bg-zinc-900 text-white shadow-sm"
+                        : "bg-white border border-zinc-300 text-zinc-500 hover:text-zinc-700 hover:border-zinc-400"
                     }`}
                   >
                     {SITREP_SECTION_TITLES[key] ?? key}
@@ -462,9 +588,8 @@ export default function Home() {
               })}
             </div>
 
-            {/* Active section editor */}
             {editingSitrepSection && sitrep[editingSitrepSection] !== undefined && (
-              <div className="border border-zinc-300 rounded overflow-hidden">
+              <div className="border border-zinc-300 rounded-lg overflow-hidden shadow-sm">
                 <MDEditor
                   value={sitrep[editingSitrepSection]}
                   onChange={(val) => updateSitrepSection(editingSitrepSection, val ?? "")}
@@ -488,7 +613,7 @@ export default function Home() {
               </button>
               <button
                 onClick={confirmSitrep}
-                className="bg-zinc-900 text-white px-6 py-2 rounded font-medium text-sm hover:bg-zinc-800 transition-colors"
+                className="bg-zinc-900 text-white px-6 py-2.5 rounded-lg font-medium text-sm hover:bg-zinc-800 transition-colors shadow-sm"
               >
                 Approve &amp; Forecast
               </button>
@@ -498,13 +623,18 @@ export default function Home() {
 
         {/* Step: Forecasting / Summarizing */}
         {(step === "forecasting" || step === "summarizing") && (
-          <div className="flex flex-col items-center justify-center gap-3 py-16">
+          <div className="flex flex-col items-center justify-center gap-4 py-20">
             <Spinner />
-            <p className="text-zinc-500 text-sm">
-              {step === "forecasting"
-                ? "Running 6 scenario subagents across 4 timeframes..."
-                : "Generating executive summary..."}
-            </p>
+            <div className="text-center">
+              <p className="text-zinc-700 text-sm font-medium">
+                {step === "forecasting" ? "Running forecast agents" : "Generating executive summary"}
+              </p>
+              <p className="text-zinc-400 text-xs mt-1">
+                {step === "forecasting"
+                  ? "6 agents analyzing across 4 timeframes..."
+                  : "Synthesizing cross-lens consensus..."}
+              </p>
+            </div>
           </div>
         )}
 
@@ -512,16 +642,15 @@ export default function Home() {
         {step === "done" && (
           <div className="flex flex-col gap-6">
             {/* Section tabs */}
-            <p className="text-xs text-zinc-400">Select a section to view</p>
-            <div className="flex gap-2 border-b border-zinc-200 pb-1">
+            <div className="flex gap-1 border-b border-zinc-200 pb-0">
               {(["summary", "sitrep", "forecasts", "analysis"] as const).map((tab) => (
                 <button
                   key={tab}
                   onClick={() => setDoneTab(tab)}
-                  className={`px-4 py-2 text-sm font-medium rounded-t transition-colors ${
+                  className={`px-4 py-2.5 text-sm font-medium transition-all border-b-2 -mb-px ${
                     doneTab === tab
-                      ? "bg-zinc-900 text-white"
-                      : "text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100"
+                      ? "border-zinc-900 text-zinc-900"
+                      : "border-transparent text-zinc-400 hover:text-zinc-600 hover:border-zinc-300"
                   }`}
                 >
                   {tab === "summary" ? "Executive Summary" : tab === "sitrep" ? "Situation Report" : tab === "forecasts" ? "Scenario Forecasts" : "Run Analysis"}
@@ -534,9 +663,7 @@ export default function Home() {
               <section>
                 <div className="flex items-center gap-3 mb-3">
                   <h2 className="text-lg font-semibold text-zinc-900">Executive Summary</h2>
-                  <span className="text-xs text-zinc-400 bg-zinc-100 px-2 py-0.5 rounded font-mono">
-                    Grok 4.1 Fast
-                  </span>
+                  <AgentBadge label="Grok 4.1 Fast" />
                 </div>
                 <MarkdownView content={summary} />
               </section>
@@ -547,9 +674,7 @@ export default function Home() {
               <section>
                 <div className="flex items-center gap-3 mb-3">
                   <h2 className="text-lg font-semibold text-zinc-900">Situation Report</h2>
-                  <span className="text-xs text-zinc-400 bg-zinc-100 px-2 py-0.5 rounded font-mono">
-                    Gemini 3.1 Flash Lite
-                  </span>
+                  <AgentBadge label="Gemini 3.1 Flash Lite" />
                 </div>
                 <div className="flex flex-wrap gap-2 mb-4">
                   {Object.entries(SITREP_SECTION_TITLES).map(([key, title]) => {
@@ -558,10 +683,10 @@ export default function Home() {
                       <button
                         key={key}
                         onClick={() => setActiveSitrepSection(activeSitrepSection === key ? null : key)}
-                        className={`px-3 py-1.5 rounded text-xs font-mono transition-colors ${
+                        className={`px-3 py-1.5 rounded-md text-xs font-mono transition-all ${
                           activeSitrepSection === key
-                            ? "bg-zinc-200 text-zinc-900"
-                            : "bg-white border border-zinc-300 text-zinc-500 hover:text-zinc-700"
+                            ? "bg-zinc-900 text-white shadow-sm"
+                            : "bg-white border border-zinc-200 text-zinc-500 hover:text-zinc-700 hover:border-zinc-400"
                         }`}
                       >
                         {title}
@@ -573,7 +698,7 @@ export default function Home() {
                   <MarkdownView content={sitrep[activeSitrepSection]} />
                 )}
                 {!activeSitrepSection && (
-                  <p className="text-zinc-400 text-sm">Select a section to view.</p>
+                  <p className="text-zinc-400 text-sm py-4">Select a section to view.</p>
                 )}
               </section>
             )}
@@ -581,34 +706,126 @@ export default function Home() {
             {/* Tab: Scenario Forecasts */}
             {doneTab === "forecasts" && (
               <section>
-                <h2 className="text-lg font-semibold mb-3 text-zinc-900">Scenario Forecasts</h2>
-                <div className="flex flex-wrap gap-2 mb-4">
-                  {LENSES.map((lens) => (
-                    <button
-                      key={lens.id}
-                      onClick={() => setActiveLens(activeLens === lens.id ? null : lens.id)}
-                      className={`px-3 py-1.5 rounded text-xs font-mono transition-colors ${
-                        activeLens === lens.id
-                          ? "bg-zinc-200 text-zinc-900"
-                          : "bg-white border border-zinc-300 text-zinc-500 hover:text-zinc-700"
-                      }`}
-                    >
-                      {lens.name}
-                    </button>
-                  ))}
-                </div>
-                {activeLens && forecasts[activeLens] && (
-                  <>
-                    <div className="flex items-center gap-2 mb-2">
-                      <span className="text-xs text-zinc-400 bg-zinc-100 px-2 py-0.5 rounded font-mono">
-                        Agent: {LENS_AGENTS[activeLens]?.label}
-                      </span>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold text-zinc-900">Scenario Forecasts</h2>
+                  {hasTimeframeData && (
+                    <div className="flex bg-zinc-100 rounded-lg p-0.5">
+                      <button
+                        onClick={() => setForecastView("by-timeframe")}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                          forecastView === "by-timeframe"
+                            ? "bg-white text-zinc-900 shadow-sm"
+                            : "text-zinc-500 hover:text-zinc-700"
+                        }`}
+                      >
+                        By Timeframe
+                      </button>
+                      <button
+                        onClick={() => setForecastView("by-lens")}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                          forecastView === "by-lens"
+                            ? "bg-white text-zinc-900 shadow-sm"
+                            : "text-zinc-500 hover:text-zinc-700"
+                        }`}
+                      >
+                        By Lens
+                      </button>
                     </div>
-                    <MarkdownView content={forecasts[activeLens]} />
+                  )}
+                </div>
+
+                {/* By-Timeframe View */}
+                {forecastView === "by-timeframe" && hasTimeframeData && (
+                  <>
+                    <div className="flex gap-2 mb-5">
+                      {TIMEFRAMES.map((tf) => (
+                        <button
+                          key={tf.id}
+                          onClick={() => setActiveTimeframe(tf.id)}
+                          className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                            activeTimeframe === tf.id
+                              ? "bg-zinc-900 text-white shadow-sm"
+                              : "bg-white border border-zinc-200 text-zinc-500 hover:text-zinc-700 hover:border-zinc-400"
+                          }`}
+                        >
+                          {tf.short}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="space-y-4">
+                      {LENSES.map((lens) => {
+                        const forecast = forecasts[lens.id];
+                        if (!forecast) return null;
+                        const tfContent = forecast.timeframes[activeTimeframe];
+                        if (!tfContent) return null;
+                        return (
+                          <div key={lens.id} className="border border-zinc-200 rounded-lg overflow-hidden">
+                            <div className="flex items-center justify-between px-4 py-3 bg-zinc-50 border-b border-zinc-200">
+                              <div className="flex items-center gap-2.5">
+                                <LensIcon lensId={lens.id} />
+                                <span className="text-sm font-semibold text-zinc-800">{lens.name}</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <AgentBadge label={LENS_AGENTS[lens.id]?.label ?? ""} />
+                                <button
+                                  onClick={() => downloadLensPdf(lens.id)}
+                                  disabled={downloadingLens === lens.id}
+                                  className="text-xs text-zinc-400 hover:text-zinc-700 transition-colors px-2 py-1 rounded hover:bg-zinc-100 disabled:opacity-50"
+                                  title={`Download ${lens.name} PDF`}
+                                >
+                                  {downloadingLens === lens.id ? "\u23F3" : "\u2193 PDF"}
+                                </button>
+                              </div>
+                            </div>
+                            <div className="p-4">
+                              <MarkdownView content={tfContent} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </>
                 )}
-                {!activeLens && (
-                  <p className="text-zinc-400 text-sm">Select a lens to view its forecast.</p>
+
+                {/* By-Lens View (also used as fallback when no structured timeframe data) */}
+                {(forecastView === "by-lens" || !hasTimeframeData) && (
+                  <>
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      {LENSES.map((lens) => (
+                        <button
+                          key={lens.id}
+                          onClick={() => setActiveLens(activeLens === lens.id ? null : lens.id)}
+                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-mono transition-all ${
+                            activeLens === lens.id
+                              ? "bg-zinc-900 text-white shadow-sm"
+                              : "bg-white border border-zinc-200 text-zinc-500 hover:text-zinc-700 hover:border-zinc-400"
+                          }`}
+                        >
+                          <LensIcon lensId={lens.id} />
+                          {lens.name}
+                        </button>
+                      ))}
+                    </div>
+                    {activeLens && forecasts[activeLens] && (
+                      <>
+                        <div className="flex items-center gap-2 mb-2">
+                          <AgentBadge label={LENS_AGENTS[activeLens]?.label ?? ""} />
+                          <button
+                            onClick={() => downloadLensPdf(activeLens)}
+                            disabled={downloadingLens === activeLens}
+                            className="text-xs text-zinc-400 hover:text-zinc-700 transition-colors px-2 py-1 rounded hover:bg-zinc-100 disabled:opacity-50"
+                          >
+                            {downloadingLens === activeLens ? "\u23F3" : "\u2193 Download PDF"}
+                          </button>
+                        </div>
+                        <MarkdownView content={forecasts[activeLens].full} />
+                      </>
+                    )}
+                    {!activeLens && (
+                      <p className="text-zinc-400 text-sm py-4">Select a lens to view its forecast.</p>
+                    )}
+                  </>
                 )}
               </section>
             )}
@@ -618,8 +835,7 @@ export default function Home() {
               <section>
                 <h2 className="text-lg font-semibold mb-4 text-zinc-900">Run Analysis</h2>
 
-                {/* Pipeline metadata table */}
-                <div className="border border-zinc-200 rounded overflow-hidden mb-6">
+                <div className="border border-zinc-200 rounded-lg overflow-hidden mb-6">
                   <table className="w-full text-sm">
                     <tbody>
                       {[
@@ -639,40 +855,54 @@ export default function Home() {
                   </table>
                 </div>
 
-                {/* Agent assignments */}
                 <h3 className="text-sm font-semibold text-zinc-700 mb-3">Forecast Agent Assignments</h3>
                 <div className="grid grid-cols-2 gap-2 mb-6">
                   {LENSES.map((lens) => {
                     const agent = LENS_AGENTS[lens.id];
-                    const hasOutput = !!forecasts[lens.id];
+                    const hasOutput = !!forecasts[lens.id]?.full;
                     return (
                       <div
                         key={lens.id}
-                        className="flex items-center justify-between border border-zinc-200 rounded px-3 py-2"
+                        className="flex items-center justify-between border border-zinc-200 rounded-lg px-3 py-2.5"
                       >
                         <div className="flex items-center gap-2">
-                          <span className={`w-2 h-2 rounded-full ${hasOutput ? "bg-green-500" : "bg-red-400"}`} />
+                          <span className={`w-2 h-2 rounded-full ${hasOutput ? "bg-emerald-500" : "bg-red-400"}`} />
+                          <LensIcon lensId={lens.id} />
                           <span className="text-sm font-medium text-zinc-700">{lens.name}</span>
                         </div>
-                        <span className="text-xs text-zinc-400 font-mono">{agent?.label}</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-zinc-400 font-mono">{agent?.label}</span>
+                          {hasOutput && (
+                            <button
+                              onClick={() => downloadLensPdf(lens.id)}
+                              disabled={downloadingLens === lens.id}
+                              className="text-xs text-zinc-400 hover:text-zinc-700 transition-colors px-1.5 py-0.5 rounded hover:bg-zinc-100 disabled:opacity-50"
+                              title={`Download ${lens.name} PDF`}
+                            >
+                              {downloadingLens === lens.id ? "\u23F3" : "\u2193"}
+                            </button>
+                          )}
+                        </div>
                       </div>
                     );
                   })}
                 </div>
 
-                {/* Quick-explore all scenarios */}
                 <h3 className="text-sm font-semibold text-zinc-700 mb-3">Quick Explore</h3>
                 <div className="space-y-3">
                   {LENSES.map((lens) => {
-                    if (!forecasts[lens.id]) return null;
+                    if (!forecasts[lens.id]?.full) return null;
                     return (
-                      <details key={lens.id} className="border border-zinc-200 rounded group">
-                        <summary className="px-4 py-2.5 cursor-pointer flex items-center justify-between text-sm font-medium text-zinc-700 bg-zinc-50 hover:bg-zinc-100 transition-colors">
-                          <span>{lens.name} Lens</span>
+                      <details key={lens.id} className="border border-zinc-200 rounded-lg group">
+                        <summary className="px-4 py-2.5 cursor-pointer flex items-center justify-between text-sm font-medium text-zinc-700 bg-zinc-50 hover:bg-zinc-100 transition-colors rounded-lg">
+                          <div className="flex items-center gap-2">
+                            <LensIcon lensId={lens.id} />
+                            <span>{lens.name} Lens</span>
+                          </div>
                           <span className="text-xs text-zinc-400 font-mono">{LENS_AGENTS[lens.id]?.label}</span>
                         </summary>
                         <div className="p-4 border-t border-zinc-100">
-                          <MarkdownView content={forecasts[lens.id]} />
+                          <MarkdownView content={forecasts[lens.id].full} />
                         </div>
                       </details>
                     );
@@ -691,20 +921,49 @@ export default function Home() {
               </button>
               <button
                 onClick={downloadPdf}
-                className="bg-zinc-900 text-white px-6 py-2 rounded font-medium text-sm hover:bg-zinc-800 transition-colors"
+                className="bg-zinc-900 text-white px-6 py-2.5 rounded-lg font-medium text-sm hover:bg-zinc-800 transition-colors shadow-sm"
               >
-                Download PDF Report
+                Download Full Report
               </button>
             </div>
           </div>
         )}
       </main>
+
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </>
   );
 }
 
+/* ── Small UI Components ── */
+
 function Spinner() {
   return (
-    <div className="w-6 h-6 border-2 border-zinc-300 border-t-zinc-800 rounded-full animate-spin" />
+    <div className="w-8 h-8 border-2 border-zinc-200 border-t-zinc-700 rounded-full animate-spin" />
+  );
+}
+
+function AgentBadge({ label }: { label: string }) {
+  return (
+    <span className="text-[10px] text-zinc-400 bg-zinc-100 px-2 py-0.5 rounded font-mono tracking-tight">
+      {label}
+    </span>
+  );
+}
+
+const LENS_ICONS: Record<string, string> = {
+  neutral: "\u2696",      // scales
+  pessimistic: "\u26A0",  // warning
+  optimistic: "\u2600",   // sun
+  blindsides: "\u26A1",   // lightning
+  probabilistic: "\u2684", // die
+  historical: "\u231B",   // hourglass
+};
+
+function LensIcon({ lensId }: { lensId: string }) {
+  return (
+    <span className="text-xs opacity-60" title={lensId}>
+      {LENS_ICONS[lensId] ?? "\u25CF"}
+    </span>
   );
 }

@@ -9,9 +9,12 @@ export async function POST(request: Request) {
     return Response.json({ error: "forecasts are required" }, { status: 400 });
   }
 
-  const forecastText = LENSES.map(
-    (lens) => `=== ${lens.name.toUpperCase()} LENS ===\n${forecasts[lens.id] ?? "N/A"}`
-  ).join("\n\n");
+  const forecastText = LENSES.map((lens) => {
+    const f = forecasts[lens.id];
+    // Handle both old (string) and new (object with .full) forecast shapes
+    const text = typeof f === "string" ? f : f?.full ?? "N/A";
+    return `=== ${lens.name.toUpperCase()} LENS ===\n${text}`;
+  }).join("\n\n");
 
   const result = await generateText({
     model: openrouter(MODELS.grok),

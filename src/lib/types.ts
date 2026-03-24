@@ -37,3 +37,18 @@ export const LENSES = [
 ] as const;
 
 export type LensId = (typeof LENSES)[number]["id"];
+
+export const TIMEFRAMES = [
+  { id: "24h", label: "Next 24 Hours", short: "24h" },
+  { id: "1w", label: "Next 1 Week", short: "1 Week" },
+  { id: "1m", label: "Next 1 Month", short: "1 Month" },
+  { id: "1y", label: "Next 1 Year", short: "1 Year" },
+] as const;
+
+export type TimeframeId = (typeof TIMEFRAMES)[number]["id"];
+
+/** Structured forecast output from each lens agent */
+export interface LensForecast {
+  full: string;
+  timeframes: Record<string, string>;
+}

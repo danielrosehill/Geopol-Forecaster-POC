@@ -1,4 +1,4 @@
-import { buildTypstSource } from "@/lib/typst-template";
+import { buildLensTypstSource } from "@/lib/typst-template";
 import { execFile } from "node:child_process";
 import { writeFile, readFile, unlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -6,28 +6,26 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 
 export async function POST(request: Request) {
-  const { sessionId, createdAt, groundTruth, sitrep, forecasts, summary } =
+  const { lensId, lensName, agentModel, content, sessionId, createdAt } =
     await request.json();
 
-  // Normalize forecasts: new shape has .full, old shape is plain string
-  const normalizedForecasts: Record<string, string> = {};
-  for (const [key, val] of Object.entries(forecasts)) {
-    normalizedForecasts[key] = typeof val === "string" ? val : (val as { full: string }).full ?? "";
+  if (!content || !lensId) {
+    return new Response("Missing lens content", { status: 400 });
   }
 
-  const typstSource = buildTypstSource({
+  const typstSource = buildLensTypstSource({
+    lensId,
+    lensName,
+    agentModel,
+    content,
     sessionId,
     createdAt,
-    groundTruth,
-    sitrep: sitrep ?? null,
-    forecasts: normalizedForecasts,
-    summary,
   });
 
-  const dir = join(tmpdir(), "geopol-" + randomUUID());
+  const dir = join(tmpdir(), "geopol-lens-" + randomUUID());
   await mkdir(dir, { recursive: true });
-  const inputPath = join(dir, "report.typ");
-  const outputPath = join(dir, "report.pdf");
+  const inputPath = join(dir, "lens.typ");
+  const outputPath = join(dir, "lens.pdf");
 
   await writeFile(inputPath, typstSource, "utf-8");
 
@@ -41,13 +39,16 @@ export async function POST(request: Request) {
     });
   });
 
-  // Cleanup
   await Promise.all([unlink(inputPath), unlink(outputPath)]).catch(() => {});
+
+  const safeName = lensName.toLowerCase().replace(/\s+/g, "-");
+  const ts = new Date(createdAt).toISOString().slice(0, 16).replace(/[T:]/g, "-");
+  const filename = `${safeName}-forecast-${ts}-${sessionId.slice(0, 8)}.pdf`;
 
   return new Response(new Uint8Array(pdf), {
     headers: {
       "Content-Type": "application/pdf",
-      "Content-Disposition": `attachment; filename="geopol-full-report-${new Date(createdAt).toISOString().slice(0, 16).replace(/[T:]/g, "-")}-${sessionId.slice(0, 8)}.pdf"`,
+      "Content-Disposition": `attachment; filename="${filename}"`,
     },
   });
 }
