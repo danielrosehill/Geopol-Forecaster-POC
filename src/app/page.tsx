@@ -1,9 +1,22 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
+import dynamic from "next/dynamic";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { LENSES } from "@/lib/types";
 
-type Step = "idle" | "gathering" | "review" | "sitrep" | "forecasting" | "summarizing" | "done";
+const MDEditor = dynamic(() => import("@uiw/react-md-editor"), { ssr: false });
+
+type Step =
+  | "idle"
+  | "gathering"
+  | "review"
+  | "sitrep"
+  | "sitrep_review"
+  | "forecasting"
+  | "summarizing"
+  | "done";
 
 interface SessionEntry {
   id: string;
@@ -32,12 +45,26 @@ const SITREP_SECTION_TITLES: Record<string, string> = {
   outlook: "12–24h Outlook",
 };
 
+const SITREP_SECTION_ORDER = Object.keys(SITREP_SECTION_TITLES);
+
 function saveSession(session: SessionEntry) {
   return fetch("/api/sessions", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(session),
   });
+}
+
+/* ── Markdown prose styles ── */
+const proseClasses =
+  "prose prose-sm prose-zinc max-w-none prose-headings:text-zinc-900 prose-p:text-zinc-700 prose-strong:text-zinc-800 prose-li:text-zinc-700 prose-a:text-blue-600";
+
+function MarkdownView({ content }: { content: string }) {
+  return (
+    <div className={`bg-zinc-50 border border-zinc-200 rounded p-4 ${proseClasses}`}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+    </div>
+  );
 }
 
 export default function Home() {
@@ -55,6 +82,7 @@ export default function Home() {
   const [error, setError] = useState("");
   const [activeLens, setActiveLens] = useState<string | null>(null);
   const [activeSitrepSection, setActiveSitrepSection] = useState<string | null>(null);
+  const [editingSitrepSection, setEditingSitrepSection] = useState<string | null>(null);
 
   // Load sessions from backend on mount
   useEffect(() => {
@@ -95,6 +123,7 @@ export default function Home() {
     setError("");
     setActiveLens(null);
     setActiveSitrepSection(null);
+    setEditingSitrepSection(null);
   }, []);
 
   const startNewSession = useCallback(() => {
@@ -111,6 +140,7 @@ export default function Home() {
     setError("");
     setActiveLens(null);
     setActiveSitrepSection(null);
+    setEditingSitrepSection(null);
   }, []);
 
   const startGathering = useCallback(async () => {
@@ -137,12 +167,12 @@ export default function Home() {
     }
   }, [sessionId, createdAt, persistAndUpdateList]);
 
+  /* Confirm ground truth → generate SITREP → pause at sitrep_review */
   const confirmGroundTruth = useCallback(async () => {
     setError("");
     setStep("sitrep");
 
     try {
-      // Generate SITREP
       const sitrepRes = await fetch("/api/sitrep", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -151,7 +181,27 @@ export default function Home() {
       if (!sitrepRes.ok) throw new Error(`SITREP generation failed: ${sitrepRes.statusText}`);
       const sitrepData = await sitrepRes.json();
       setSitrep(sitrepData.sitrep);
+      setStep("sitrep_review");
 
+      // Auto-select first section for editing
+      const firstKey = SITREP_SECTION_ORDER.find((k) => sitrepData.sitrep[k]);
+      if (firstKey) setEditingSitrepSection(firstKey);
+
+      await persistAndUpdateList({
+        id: sessionId, createdAt, step: "sitrep_review",
+        groundTruth, sitrep: sitrepData.sitrep, forecasts: {}, summary: "",
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+      setStep("review");
+    }
+  }, [groundTruth, sessionId, createdAt, persistAndUpdateList]);
+
+  /* Confirm SITREP → forecast → summarize → done */
+  const confirmSitrep = useCallback(async () => {
+    setError("");
+
+    try {
       // Forecast
       setStep("forecasting");
       const res = await fetch("/api/forecast", {
@@ -175,17 +225,15 @@ export default function Home() {
       setSummary(sumData.summary);
       setStep("done");
 
-      // Persist completed session
       await persistAndUpdateList({
         id: sessionId, createdAt, step: "done",
-        groundTruth, sitrep: sitrepData.sitrep,
-        forecasts: data.forecasts, summary: sumData.summary,
+        groundTruth, sitrep, forecasts: data.forecasts, summary: sumData.summary,
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
-      setStep("review");
+      setStep("sitrep_review");
     }
-  }, [groundTruth, sessionId, createdAt, persistAndUpdateList]);
+  }, [groundTruth, sitrep, sessionId, createdAt, persistAndUpdateList]);
 
   const downloadPdf = useCallback(async () => {
     const res = await fetch("/api/generate-pdf", {
@@ -206,8 +254,15 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }, [sessionId, createdAt, groundTruth, sitrep, forecasts, summary]);
 
-  const STEP_LABELS = ["Gather", "Review", "SITREP", "Forecast", "Summarize", "Report"] as const;
-  const STEP_MAP: Step[] = ["gathering", "review", "sitrep", "forecasting", "summarizing", "done"];
+  const updateSitrepSection = useCallback(
+    (key: string, value: string) => {
+      setSitrep((prev) => ({ ...prev, [key]: value }));
+    },
+    []
+  );
+
+  const STEP_LABELS = ["Gather", "Review", "SITREP", "Edit SITREP", "Forecast", "Summarize", "Report"] as const;
+  const STEP_MAP: Step[] = ["gathering", "review", "sitrep", "sitrep_review", "forecasting", "summarizing", "done"];
 
   return (
     <>
@@ -329,18 +384,22 @@ export default function Home() {
           </div>
         )}
 
-        {/* Step: Review */}
+        {/* Step: Review Ground Truth (rich markdown editor) */}
         {step === "review" && (
-          <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-4" data-color-mode="light">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold text-zinc-900">Draft Ground Truth</h2>
               <span className="text-xs text-zinc-400">Edit as needed, then confirm</span>
             </div>
-            <textarea
-              value={groundTruth}
-              onChange={(e) => setGroundTruth(e.target.value)}
-              className="w-full h-[500px] bg-white border border-zinc-300 rounded p-4 text-sm font-mono text-zinc-800 resize-y focus:outline-none focus:border-zinc-500 focus:ring-1 focus:ring-zinc-500"
-            />
+            <div className="border border-zinc-300 rounded overflow-hidden">
+              <MDEditor
+                value={groundTruth}
+                onChange={(val) => setGroundTruth(val ?? "")}
+                height={500}
+                preview="live"
+                visibleDragbar={false}
+              />
+            </div>
             <div className="flex gap-3 justify-end">
               <button
                 onClick={() => { setStep("idle"); setGroundTruth(""); }}
@@ -352,17 +411,80 @@ export default function Home() {
                 onClick={confirmGroundTruth}
                 className="bg-zinc-900 text-white px-6 py-2 rounded font-medium text-sm hover:bg-zinc-800 transition-colors"
               >
-                Confirm &amp; Generate
+                Confirm &amp; Generate SITREP
               </button>
             </div>
           </div>
         )}
 
-        {/* Step: SITREP generation */}
+        {/* Step: SITREP generation (loading) */}
         {step === "sitrep" && (
           <div className="flex flex-col items-center justify-center gap-3 py-16">
             <Spinner />
             <p className="text-zinc-500 text-sm">Generating structured SITREP...</p>
+          </div>
+        )}
+
+        {/* Step: SITREP Review & Edit */}
+        {step === "sitrep_review" && (
+          <div className="flex flex-col gap-4" data-color-mode="light">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-zinc-900">Review Situation Report</h2>
+              <span className="text-xs text-zinc-400">Edit sections as needed, then approve</span>
+            </div>
+
+            {/* Section tabs */}
+            <div className="flex flex-wrap gap-2">
+              {SITREP_SECTION_ORDER.map((key) => {
+                if (!sitrep[key]) return null;
+                const isActive = editingSitrepSection === key;
+                return (
+                  <button
+                    key={key}
+                    onClick={() => setEditingSitrepSection(isActive ? null : key)}
+                    className={`px-3 py-1.5 rounded text-xs font-mono transition-colors ${
+                      isActive
+                        ? "bg-zinc-900 text-white"
+                        : "bg-white border border-zinc-300 text-zinc-500 hover:text-zinc-700"
+                    }`}
+                  >
+                    {SITREP_SECTION_TITLES[key] ?? key}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Active section editor */}
+            {editingSitrepSection && sitrep[editingSitrepSection] !== undefined && (
+              <div className="border border-zinc-300 rounded overflow-hidden">
+                <MDEditor
+                  value={sitrep[editingSitrepSection]}
+                  onChange={(val) => updateSitrepSection(editingSitrepSection, val ?? "")}
+                  height={400}
+                  preview="live"
+                  visibleDragbar={false}
+                />
+              </div>
+            )}
+
+            {!editingSitrepSection && (
+              <p className="text-zinc-400 text-sm py-8 text-center">Select a section above to review and edit.</p>
+            )}
+
+            <div className="flex gap-3 justify-end border-t border-zinc-200 pt-4">
+              <button
+                onClick={() => { setStep("review"); }}
+                className="px-4 py-2 text-sm text-zinc-500 hover:text-zinc-700 transition-colors"
+              >
+                Back to Ground Truth
+              </button>
+              <button
+                onClick={confirmSitrep}
+                className="bg-zinc-900 text-white px-6 py-2 rounded font-medium text-sm hover:bg-zinc-800 transition-colors"
+              >
+                Approve &amp; Forecast
+              </button>
+            </div>
           </div>
         )}
 
@@ -384,9 +506,7 @@ export default function Home() {
             {/* Summary */}
             <section>
               <h2 className="text-lg font-semibold mb-3 text-zinc-900">Executive Summary</h2>
-              <div className="bg-zinc-50 border border-zinc-200 rounded p-4 text-sm text-zinc-700 whitespace-pre-wrap">
-                {summary}
-              </div>
+              <MarkdownView content={summary} />
             </section>
 
             {/* SITREP */}
@@ -412,9 +532,7 @@ export default function Home() {
                   })}
                 </div>
                 {activeSitrepSection && sitrep[activeSitrepSection] && (
-                  <div className="bg-zinc-50 border border-zinc-200 rounded p-4 text-sm text-zinc-700 whitespace-pre-wrap">
-                    {sitrep[activeSitrepSection]}
-                  </div>
+                  <MarkdownView content={sitrep[activeSitrepSection]} />
                 )}
                 {!activeSitrepSection && (
                   <p className="text-zinc-400 text-sm">Select a section to view.</p>
@@ -441,9 +559,7 @@ export default function Home() {
                 ))}
               </div>
               {activeLens && forecasts[activeLens] && (
-                <div className="bg-zinc-50 border border-zinc-200 rounded p-4 text-sm text-zinc-700 whitespace-pre-wrap">
-                  {forecasts[activeLens]}
-                </div>
+                <MarkdownView content={forecasts[activeLens]} />
               )}
               {!activeLens && (
                 <p className="text-zinc-400 text-sm">Select a lens to view its forecast.</p>

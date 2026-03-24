@@ -2,10 +2,10 @@ FROM node:22-slim AS base
 
 # Install typst for PDF generation
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates && \
+    curl ca-certificates xz-utils && \
     curl -fsSL https://github.com/typst/typst/releases/latest/download/typst-x86_64-unknown-linux-musl.tar.xz \
     | tar -xJ --strip-components=1 -C /usr/local/bin && \
-    apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+    apt-get purge -y curl xz-utils && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
