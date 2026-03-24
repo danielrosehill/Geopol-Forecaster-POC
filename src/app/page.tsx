@@ -47,6 +47,13 @@ const SITREP_SECTION_TITLES: Record<string, string> = {
 
 const SITREP_SECTION_ORDER = Object.keys(SITREP_SECTION_TITLES);
 
+/** Agent model assignments (mirrors forecast/route.ts logic) */
+const AGENT_MODELS = ["google/gemini-3.1-flash-lite-preview", "x-ai/grok-4.1-fast"] as const;
+const AGENT_LABELS = ["Gemini 3.1 Flash Lite", "Grok 4.1 Fast"] as const;
+const LENS_AGENTS = Object.fromEntries(
+  LENSES.map((lens, i) => [lens.id, { model: AGENT_MODELS[i % 2], label: AGENT_LABELS[i % 2] }])
+);
+
 function saveSession(session: SessionEntry) {
   return fetch("/api/sessions", {
     method: "PUT",
@@ -83,6 +90,7 @@ export default function Home() {
   const [activeLens, setActiveLens] = useState<string | null>(null);
   const [activeSitrepSection, setActiveSitrepSection] = useState<string | null>(null);
   const [editingSitrepSection, setEditingSitrepSection] = useState<string | null>(null);
+  const [doneTab, setDoneTab] = useState<"summary" | "sitrep" | "forecasts" | "analysis">("summary");
 
   // Load sessions from backend on mount
   useEffect(() => {
@@ -503,16 +511,46 @@ export default function Home() {
         {/* Step: Done */}
         {step === "done" && (
           <div className="flex flex-col gap-6">
-            {/* Summary */}
-            <section>
-              <h2 className="text-lg font-semibold mb-3 text-zinc-900">Executive Summary</h2>
-              <MarkdownView content={summary} />
-            </section>
+            {/* Section tabs */}
+            <p className="text-xs text-zinc-400">Select a section to view</p>
+            <div className="flex gap-2 border-b border-zinc-200 pb-1">
+              {(["summary", "sitrep", "forecasts", "analysis"] as const).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setDoneTab(tab)}
+                  className={`px-4 py-2 text-sm font-medium rounded-t transition-colors ${
+                    doneTab === tab
+                      ? "bg-zinc-900 text-white"
+                      : "text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100"
+                  }`}
+                >
+                  {tab === "summary" ? "Executive Summary" : tab === "sitrep" ? "Situation Report" : tab === "forecasts" ? "Scenario Forecasts" : "Run Analysis"}
+                </button>
+              ))}
+            </div>
 
-            {/* SITREP */}
-            {Object.keys(sitrep).length > 0 && (
+            {/* Tab: Executive Summary */}
+            {doneTab === "summary" && (
               <section>
-                <h2 className="text-lg font-semibold mb-3 text-zinc-900">Situation Report</h2>
+                <div className="flex items-center gap-3 mb-3">
+                  <h2 className="text-lg font-semibold text-zinc-900">Executive Summary</h2>
+                  <span className="text-xs text-zinc-400 bg-zinc-100 px-2 py-0.5 rounded font-mono">
+                    Grok 4.1 Fast
+                  </span>
+                </div>
+                <MarkdownView content={summary} />
+              </section>
+            )}
+
+            {/* Tab: SITREP */}
+            {doneTab === "sitrep" && Object.keys(sitrep).length > 0 && (
+              <section>
+                <div className="flex items-center gap-3 mb-3">
+                  <h2 className="text-lg font-semibold text-zinc-900">Situation Report</h2>
+                  <span className="text-xs text-zinc-400 bg-zinc-100 px-2 py-0.5 rounded font-mono">
+                    Gemini 3.1 Flash Lite
+                  </span>
+                </div>
                 <div className="flex flex-wrap gap-2 mb-4">
                   {Object.entries(SITREP_SECTION_TITLES).map(([key, title]) => {
                     if (!sitrep[key]) return null;
@@ -540,31 +578,108 @@ export default function Home() {
               </section>
             )}
 
-            {/* Forecasts */}
-            <section>
-              <h2 className="text-lg font-semibold mb-3 text-zinc-900">Scenario Forecasts</h2>
-              <div className="flex flex-wrap gap-2 mb-4">
-                {LENSES.map((lens) => (
-                  <button
-                    key={lens.id}
-                    onClick={() => setActiveLens(activeLens === lens.id ? null : lens.id)}
-                    className={`px-3 py-1.5 rounded text-xs font-mono transition-colors ${
-                      activeLens === lens.id
-                        ? "bg-zinc-200 text-zinc-900"
-                        : "bg-white border border-zinc-300 text-zinc-500 hover:text-zinc-700"
-                    }`}
-                  >
-                    {lens.name}
-                  </button>
-                ))}
-              </div>
-              {activeLens && forecasts[activeLens] && (
-                <MarkdownView content={forecasts[activeLens]} />
-              )}
-              {!activeLens && (
-                <p className="text-zinc-400 text-sm">Select a lens to view its forecast.</p>
-              )}
-            </section>
+            {/* Tab: Scenario Forecasts */}
+            {doneTab === "forecasts" && (
+              <section>
+                <h2 className="text-lg font-semibold mb-3 text-zinc-900">Scenario Forecasts</h2>
+                <div className="flex flex-wrap gap-2 mb-4">
+                  {LENSES.map((lens) => (
+                    <button
+                      key={lens.id}
+                      onClick={() => setActiveLens(activeLens === lens.id ? null : lens.id)}
+                      className={`px-3 py-1.5 rounded text-xs font-mono transition-colors ${
+                        activeLens === lens.id
+                          ? "bg-zinc-200 text-zinc-900"
+                          : "bg-white border border-zinc-300 text-zinc-500 hover:text-zinc-700"
+                      }`}
+                    >
+                      {lens.name}
+                    </button>
+                  ))}
+                </div>
+                {activeLens && forecasts[activeLens] && (
+                  <>
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-xs text-zinc-400 bg-zinc-100 px-2 py-0.5 rounded font-mono">
+                        Agent: {LENS_AGENTS[activeLens]?.label}
+                      </span>
+                    </div>
+                    <MarkdownView content={forecasts[activeLens]} />
+                  </>
+                )}
+                {!activeLens && (
+                  <p className="text-zinc-400 text-sm">Select a lens to view its forecast.</p>
+                )}
+              </section>
+            )}
+
+            {/* Tab: Run Analysis */}
+            {doneTab === "analysis" && (
+              <section>
+                <h2 className="text-lg font-semibold mb-4 text-zinc-900">Run Analysis</h2>
+
+                {/* Pipeline metadata table */}
+                <div className="border border-zinc-200 rounded overflow-hidden mb-6">
+                  <table className="w-full text-sm">
+                    <tbody>
+                      {[
+                        ["Session ID", sessionId.slice(0, 8)],
+                        ["Timestamp", new Date(createdAt).toUTCString()],
+                        ["Ground Truth Sources", "Gemini 3.1 Flash Lite (search-grounded) + Grok 4.1 Fast"],
+                        ["SITREP Agent", "Gemini 3.1 Flash Lite (via OpenRouter)"],
+                        ["Forecast Agents", `${LENSES.length} parallel lenses`],
+                        ["Summary Agent", "Grok 4.1 Fast (via OpenRouter)"],
+                      ].map(([label, value]) => (
+                        <tr key={label} className="border-b border-zinc-100 last:border-0">
+                          <td className="px-4 py-2.5 font-medium text-zinc-700 bg-zinc-50 w-48">{label}</td>
+                          <td className="px-4 py-2.5 text-zinc-600 font-mono text-xs">{value}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Agent assignments */}
+                <h3 className="text-sm font-semibold text-zinc-700 mb-3">Forecast Agent Assignments</h3>
+                <div className="grid grid-cols-2 gap-2 mb-6">
+                  {LENSES.map((lens) => {
+                    const agent = LENS_AGENTS[lens.id];
+                    const hasOutput = !!forecasts[lens.id];
+                    return (
+                      <div
+                        key={lens.id}
+                        className="flex items-center justify-between border border-zinc-200 rounded px-3 py-2"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className={`w-2 h-2 rounded-full ${hasOutput ? "bg-green-500" : "bg-red-400"}`} />
+                          <span className="text-sm font-medium text-zinc-700">{lens.name}</span>
+                        </div>
+                        <span className="text-xs text-zinc-400 font-mono">{agent?.label}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Quick-explore all scenarios */}
+                <h3 className="text-sm font-semibold text-zinc-700 mb-3">Quick Explore</h3>
+                <div className="space-y-3">
+                  {LENSES.map((lens) => {
+                    if (!forecasts[lens.id]) return null;
+                    return (
+                      <details key={lens.id} className="border border-zinc-200 rounded group">
+                        <summary className="px-4 py-2.5 cursor-pointer flex items-center justify-between text-sm font-medium text-zinc-700 bg-zinc-50 hover:bg-zinc-100 transition-colors">
+                          <span>{lens.name} Lens</span>
+                          <span className="text-xs text-zinc-400 font-mono">{LENS_AGENTS[lens.id]?.label}</span>
+                        </summary>
+                        <div className="p-4 border-t border-zinc-100">
+                          <MarkdownView content={forecasts[lens.id]} />
+                        </div>
+                      </details>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
 
             {/* Actions */}
             <div className="flex gap-3 justify-end border-t border-zinc-200 pt-4">
