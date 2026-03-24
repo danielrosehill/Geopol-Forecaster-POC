@@ -9,18 +9,12 @@ export async function POST(request: Request) {
   const { sessionId, createdAt, groundTruth, sitrep, forecasts, summary } =
     await request.json();
 
-  // Normalize forecasts: new shape has .full, old shape is plain string
-  const normalizedForecasts: Record<string, string> = {};
-  for (const [key, val] of Object.entries(forecasts)) {
-    normalizedForecasts[key] = typeof val === "string" ? val : (val as { full: string }).full ?? "";
-  }
-
   const typstSource = buildTypstSource({
     sessionId,
     createdAt,
     groundTruth,
     sitrep: sitrep ?? null,
-    forecasts: normalizedForecasts,
+    forecasts,
     summary,
   });
 

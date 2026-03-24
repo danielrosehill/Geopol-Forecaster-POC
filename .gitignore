@@ -39,6 +39,10 @@ yarn-error.log*
 # sqlite data
 /data
 
+# pipeline reports (generated, potentially large)
+/reports/*
+!/reports/.gitkeep
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
